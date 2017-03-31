@@ -7,8 +7,17 @@ import numpy as np
 import math
 import gym
 import sys
+import theano
+import theano.tensor as T
 
 from gym.envs.registration import register, spec
+
+class ConsiderConstant(theano.compile.ViewOp):
+    def grad(self, args, g_outs):
+        return [T.zeros_like(g_out) for g_out in g_outs]
+
+consider_constant = ConsiderConstant()
+
 
 MY_ENV_NAME='FrozenLakeNonskid8x8-v0'
 try:
@@ -56,14 +65,13 @@ actor_model.add(Activation('linear'))
 a_optimizer = SGD(lr=0.1, decay=1e-6, momentum=0.9, nesterov=True)
 actor_model.compile(loss='mse', optimizer=a_optimizer)
 
-
 # The Critic
 # Next, we set up the Critic network. This network looks very similar to the Actor model, but only outputs a single value - it outputs a value (the score) for the input state.
 
 critic_model = Sequential()
 
 critic_model = Sequential()
-critic_model.add(Dense(164, init='lecun_uniform', input_shape=(OBSERVATION_SPACE,)))
+critic_model.add(Dense(164, init='lecun_uniform', input_shape=(OBSERVATION_SPACE+ACTION_SPACE,)))
 critic_model.add(Activation('relu'))
 critic_model.add(Dense(150, init='lecun_uniform'))
 critic_model.add(Activation('relu'))
@@ -106,7 +114,7 @@ def plot_value(initial_state):
 
 env.reset()
 env.render()
-plot_value(STATEGRID)
+#plot_value(STATEGRID)
 
 def zero_critic(epochs=100):
     for i in range(epochs):
@@ -116,8 +124,8 @@ def zero_critic(epochs=100):
 
             y = np.empty([1])
             y[0]=0.0
-            x = to_onehot(OBSERVATION_SPACE,j)
-            X_train.append(x.reshape((OBSERVATION_SPACE,)))
+            x = to_onehot(OBSERVATION_SPACE+ACTION_SPACE,j)
+            X_train.append(x.reshape((OBSERVATION_SPACE+ACTION_SPACE,)))
             y_train.append(y.reshape((1,)))
             X_train = np.array(X_train)
             y_train = np.array(y_train)
@@ -127,7 +135,7 @@ print("Zeroing out critic network...")
 sys.stdout.flush()
 zero_critic()
 print("Done!")
-plot_value(STATEGRID)
+#plot_value(STATEGRID)
 
 from IPython.display import clear_output
 import random
@@ -154,19 +162,28 @@ def trainer(epochs=10000, batchSize=40,
             # Get original state, original reward, and critic's value for this state.
             orig_state = to_onehot(OBSERVATION_SPACE,observation)
             orig_reward = reward
-            orig_val = critic_model.predict(orig_state.reshape(1,OBSERVATION_SPACE))
+            #orig_val = critic_model.predict(orig_state.reshape(1,OBSERVATION_SPACE))
 
             if (random.random() < epsilon): #choose random action
+                qval = np.asarray([[0.25,0.25,0.25,0.25]]).astype('float32')
                 action = np.random.randint(0,ACTION_SPACE)
             else: #choose best action from Q(s,a) values
                 qval = actor_model.predict( orig_state.reshape(1,OBSERVATION_SPACE) )
                 action = (np.argmax(qval))
 
+
+            state_aprob_concat = np.concatenate([orig_state.reshape(1,OBSERVATION_SPACE),qval],axis=1)
+
+
+            orig_val = critic_model.predict(state_aprob_concat)
+
+
             #Take action, observe new state S'
             new_observation, new_reward, done, info = env.step(action)
             new_state = to_onehot(OBSERVATION_SPACE,new_observation)
             # Critic's value for this new state.
-            new_val = critic_model.predict(new_state.reshape(1,OBSERVATION_SPACE))
+            new_qval = actor_model.predict( new_state.reshape(1,OBSERVATION_SPACE) )
+            new_val = critic_model.predict(np.concatenate([new_state.reshape(1,OBSERVATION_SPACE),new_qval],axis=1))
 
             if not done: # Non-terminal state.
                 target = orig_reward + ( gamma * new_val)
@@ -186,10 +203,10 @@ def trainer(epochs=10000, batchSize=40,
             best_val = max((orig_val*gamma), target)
 
             # Now append this to our critic replay buffer.
-            critic_replay.append([orig_state,best_val])
+            critic_replay.append([orig_state, qval, best_val])
             # If we are in a terminal state, append a replay for it also.
             if done:
-                critic_replay.append( [new_state, float(new_reward)] )
+                critic_replay.append( [new_state, new_qval, float(new_reward)] )
 
             # Build the update for the Actor. The actor is updated
             # by using the difference of the value the critic
@@ -208,10 +225,10 @@ def trainer(epochs=10000, batchSize=40,
                 X_train = []
                 y_train = []
                 for memory in minibatch:
-                    m_state, m_value = memory
+                    m_state, qv_value, m_value = memory
                     y = np.empty([1])
                     y[0] = m_value
-                    X_train.append(m_state.reshape((OBSERVATION_SPACE,)))
+                    X_train.append(np.concatenate([m_state.reshape((OBSERVATION_SPACE,)), qv_value.flatten()], axis = 0))
                     y_train.append(y.reshape((1,)))
                 X_train = np.array(X_train)
                 y_train = np.array(y_train)
@@ -259,7 +276,7 @@ def trainer(epochs=10000, batchSize=40,
 trainer()
 env.reset()
 env.render()
-plot_value(STATEGRID)
+#plot_value(STATEGRID)
 
 
 # We can see that the value network has placed a high value on the winning final position. That value equaling the reward gained when in that position. It also places a very low value on the 'hole' positions. Makes sense. Then we can see that the network places ever growing value on positions which move us closer to the winning position. Thus the value network can express to the policy network that a move which moves us closer to the winning position is more valuable. Lets take a look at what the policy network has learned.
